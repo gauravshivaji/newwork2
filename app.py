@@ -180,57 +180,63 @@ def add_wave0(df, timeframe):
     combined = A0 | B0 | C0
 
     lows = df["Low"].values
+    close = df["Close"].values
     n = len(df)
 
     # ---------- 1) Cluster filter: keep lowest in each neighborhood ----------
-    final_cluster = np.zeros(n, dtype=bool)
+    cluster_mask = np.zeros(n, dtype=bool)
 
     last = None
     last_low = None
 
     for idx in np.where(combined)[0]:
         if last is None:
-            final_cluster[idx] = True
+            cluster_mask[idx] = True
             last = idx
             last_low = lows[idx]
         else:
             if idx - last < params["swing_window"]:
                 # same neighborhood → keep LOWER low
                 if lows[idx] < last_low:
-                    final_cluster[last] = False
-                    final_cluster[idx] = True
+                    cluster_mask[last] = False
+                    cluster_mask[idx] = True
                     last = idx
                     last_low = lows[idx]
             else:
-                final_cluster[idx] = True
+                cluster_mask[idx] = True
                 last = idx
                 last_low = lows[idx]
 
-    # ---------- 2) New rule: NO LOWER LOW AFTER 0 (within protection window) ----------
-    # If price makes a new low soon after 0 → trend not finished → remove that 0
-    protect_n = params["swing_window"]   # you can tweak per timeframe if you want
+    # ---------- 2) Strong trend filter: AFTER 0, no downtrend ----------
+    # - In next protect_n bars:
+    #   • no lower low than 0
+    #   • final close > close at 0  (net up, not down)
+    protect_n = 2 * params["swing_window"]  # stricter window
 
     final = np.zeros(n, dtype=bool)
-    candidate_idxs = np.where(final_cluster)[0]
+    candidate_idxs = np.where(cluster_mask)[0]
 
     for idx in candidate_idxs:
-        # look ahead a fixed window
         start_f = idx + 1
         end_f = min(n, idx + 1 + protect_n)
 
+        # Not enough future data → keep it (can't disprove)
         if start_f >= end_f:
-            # not enough future data; you can either keep or drop; we keep
             final[idx] = True
             continue
 
-        future_min = lows[start_f:end_f].min()
+        future_lows = lows[start_f:end_f]
+        future_closes = close[start_f:end_f]
 
-        # if any lower low appears soon after → reject this 0
-        if future_min < lows[idx]:
-            # downtrend continued, this is not the final bottom
+        # If any lower low occurs → this wasn't the final bottom
+        if future_lows.min() < lows[idx]:
             continue
-        else:
-            final[idx] = True
+
+        # If final close is not above 0's close → treat as not real uptrend
+        if future_closes[-1] <= close[idx]:
+            continue
+
+        final[idx] = True
 
     df["Wave0"] = final
     return df
@@ -239,33 +245,80 @@ def add_wave0(df, timeframe):
 # ----------------------------------------------------------
 # ----------------- RULE A (Strict Elliott Top) -------------
 # ----------------------------------------------------------
-def rule_A5(df, piv, params):
-    A5 = np.zeros(len(df), dtype=bool)
-    rsi = df["RSI_14"].values
+def add_wave5(df, timeframe):
+    df = df.copy()
+    params = get_params(timeframe)
+
+    piv = pivot_highs(df, params["pivot_k"])
+
+    A5 = rule_A5(df, piv, params)
+    B5 = rule_B5(df, piv, params)
+    C5 = rule_C5(df, piv, params)
+
+    combined = A5 | B5 | C5
+
+    highs = df["High"].values
     close = df["Close"].values
-    high = df["High"].values
-    future_n = params["future_n"]
+    n = len(df)
 
-    for i in range(2, len(df) - future_n - 5):
+    # ---------- 1) Cluster filter: keep HIGHEST in each neighborhood ----------
+    cluster_mask = np.zeros(n, dtype=bool)
 
-        if not piv[i]:
+    last = None
+    last_high = None
+
+    for idx in np.where(combined)[0]:
+        if last is None:
+            cluster_mask[idx] = True
+            last = idx
+            last_high = highs[idx]
+        else:
+            if idx - last < params["swing_window"]:
+                # same neighborhood → keep HIGHER high
+                if highs[idx] > last_high:
+                    cluster_mask[last] = False
+                    cluster_mask[idx] = True
+                    last = idx
+                    last_high = highs[idx]
+            else:
+                cluster_mask[idx] = True
+                last = idx
+                last_high = highs[idx]
+
+    # ---------- 2) Strong trend filter: AFTER 5, no uptrend ----------
+    # - In next protect_n bars:
+    #   • no higher high than 5
+    #   • final close < close at 5  (net down, not up)
+    protect_n = 2 * params["swing_window"]
+
+    final = np.zeros(n, dtype=bool)
+    candidate_idxs = np.where(cluster_mask)[0]
+
+    for idx in candidate_idxs:
+        start_f = idx + 1
+        end_f = min(n, idx + 1 + protect_n)
+
+        # Not enough future data → keep it (can't disprove)
+        if start_f >= end_f:
+            final[idx] = True
             continue
 
-        # RSI overbought + falling
-        if rsi[i] < 70 or rsi[i] >= rsi[i - 1]:
+        future_highs = highs[start_f:end_f]
+        future_closes = close[start_f:end_f]
+
+        # If any higher high occurs → this wasn't the real top
+        if future_highs.max() > highs[idx]:
             continue
 
-        # price falling
-        if close[i] >= close[i - 1]:
+        # If final close is not BELOW 5's close → still up / sideways
+        if future_closes[-1] >= close[idx]:
             continue
 
-        # future confirmation
-        if close[i + future_n] >= close[i]:
-            continue
+        final[idx] = True
 
-        A5[i] = True
+    df["Wave5"] = final
+    return df
 
-    return A5
 
 
 # ----------------------------------------------------------
