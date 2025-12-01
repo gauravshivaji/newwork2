@@ -183,35 +183,33 @@ def add_wave0(df, timeframe):
 
     piv0 = pivot_lows(df, params["pivot_k"])
 
-    # ---- RULE A0, B0, C0 reused from earlier code ----
-    # For simplicity, reusing pure-swing rule for 0
     lows = df["Low"].values
     close = df["Close"].values
+    future_n = params["future_n"]
 
     A0 = np.zeros(len(df), dtype=bool)
     B0 = np.zeros(len(df), dtype=bool)
     C0 = np.zeros(len(df), dtype=bool)
 
-    future_n = params["future_n"]
-
-    # Simple pure-0 logic from previous version
     for i in range(len(df) - future_n):
+
         if not piv0[i]:
             continue
 
-        # B0: swing lowest
-        if lows[i] == lows[i - params["swing_window"]:i + 1].min():
+        # ---------------- B0 (Pure Swing Low) fixed ----------------
+        start = max(0, i - params["swing_window"])
+        if lows[i] == lows[start:i + 1].min():
             if close[i + future_n] > close[i]:
                 B0[i] = True
 
-        # A0: RSI bottom + reversal
+        # ---------------- A0 (RSI reversal) ----------------
         if df["RSI_14"].iloc[i] < 40 and df["RSI_14"].iloc[i] > df["RSI_14"].iloc[i - 1]:
             if close[i] > close[i - 1]:
                 A0[i] = True
 
-        # C0: Fibonacci retracement bottom
-        start = max(0, i - params["fib_window"])
-        prev_high = df["High"].iloc[start:i].max()
+        # ---------------- C0 (Fibonacci bottom) ----------------
+        start_fib = max(0, i - params["fib_window"])
+        prev_high = df["High"].iloc[start_fib:i].max()
         if prev_high > 0:
             retr = (prev_high - lows[i]) / prev_high
             if 0.58 <= retr <= 1.05:
@@ -219,7 +217,7 @@ def add_wave0(df, timeframe):
 
     combined = A0 | B0 | C0
 
-    # Cluster filter
+    # ---- cluster filtering (same as before) ----
     final = np.zeros(len(df), dtype=bool)
     last = None
     last_low = None
