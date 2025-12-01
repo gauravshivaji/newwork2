@@ -5,11 +5,11 @@ import numpy as np
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-# ---------------- CONFIG ----------------
-st.set_page_config(page_title="Elliott Pure 0 & 5", layout="wide")
 
+# ---------------- PAGE CONFIG ----------------
+st.set_page_config(page_title="Elliott Wave 0 & 5 — Pure A/B/C Rules", layout="wide")
 st.title("📈 PURE Elliott Wave 0 & 5 Detection (A OR B OR C)")
-st.caption("Strict Elliott + Pure Swing Structure + Fibonacci Terminal Logic")
+st.caption("Strict Elliott + Structural Swing + Fibonacci Terminal Logic")
 
 
 # ---------------- DATA LOADER ----------------
@@ -18,9 +18,11 @@ def load_data(ticker, period, interval):
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     if df.empty:
         return df
+
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df = df.dropna().copy()
+
+    df = df.dropna()
     df.index = pd.to_datetime(df.index)
     return df
 
@@ -28,9 +30,12 @@ def load_data(ticker, period, interval):
 # ---------------- INDICATORS ----------------
 def add_indicators(df):
     df = df.copy()
+
+    # SMAs
     for win in [20, 50, 200]:
         df[f"SMA_{win}"] = df["Close"].rolling(win).mean()
 
+    # RSI
     delta = df["Close"].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -38,31 +43,22 @@ def add_indicators(df):
     roll_up = gain.rolling(14).mean()
     roll_down = loss.rolling(14).mean()
 
-    rs = roll_up / (roll_down.replace(0, np.nan))
+    rs = roll_up / roll_down.replace(0, np.nan)
     df["RSI_14"] = 100 - (100 / (1 + rs))
 
     return df
 
 
-# ---------------- TIMEFRAME PARAMS ----------------
+# ---------------- TIMEFRAME PARAMETERS ----------------
 def get_params(tf):
     if tf == "1h":
-        return dict(pivot_k=3, swing_window=25, fib_window=70, future_n=7)
+        return dict(pivot_k=3, swing_window=25, fib_window=80, future_n=7)
     if tf == "1wk":
         return dict(pivot_k=2, swing_window=10, fib_window=30, future_n=3)
-    return dict(pivot_k=5, swing_window=20, fib_window=50, future_n=5)
+    return dict(pivot_k=5, swing_window=20, fib_window=60, future_n=5)
 
 
-# ---------------- PIVOT FINDER ----------------
-def pivot_highs(df, k):
-    highs = df["High"].values
-    n = len(df)
-    piv = np.zeros(n, dtype=bool)
-    for i in range(k, n - k):
-        if highs[i] == highs[i - k:i + k + 1].max():
-            piv[i] = True
-    return piv
-
+# ---------------- PIVOT FUNCTIONS ----------------
 def pivot_lows(df, k):
     lows = df["Low"].values
     n = len(df)
@@ -73,152 +69,118 @@ def pivot_lows(df, k):
     return piv
 
 
-# --------------------------------------------------
-# ---------------- RULE A for Wave-5 ----------------
-# STRICT ELLIOTT BOOK
-# --------------------------------------------------
-def rule_A5(df, piv5, params):
+def pivot_highs(df, k):
+    highs = df["High"].values
     n = len(df)
-    A5 = np.zeros(n, dtype=bool)
+    piv = np.zeros(n, dtype=bool)
+    for i in range(k, n - k):
+        if highs[i] == highs[i - k:i + k + 1].max():
+            piv[i] = True
+    return piv
 
-    high = df["High"].values
-    low = df["Low"].values
-    close = df["Close"].values
+
+# ----------------------------------------------------------
+# ----------------- RULE A (Strict Elliott Bottom) ----------
+# ----------------------------------------------------------
+def rule_A0(df, piv, params):
+    A0 = np.zeros(len(df), dtype=bool)
     rsi = df["RSI_14"].values
-    future_n = params["future_n"]
-
-    for i in range(n - future_n - 10):
-        if not piv5[i]:
-            continue
-
-        # RSI > 70 and falling (overbought + reversal)
-        if rsi[i] < 70 or rsi[i] >= rsi[i - 1]:
-            continue
-
-        # Price falling
-        if close[i] >= close[i - 1]:
-            continue
-
-        # Terminal impulse check
-        # Lookback strong upward move
-        hist_high = high[max(0, i - 20):i].max()
-        if high[i] < hist_high:
-            continue
-
-        # Post-5 decline confirmation
-        if close[i + future_n] >= close[i]:
-            continue
-
-        A5[i] = True
-    return A5
-
-
-# --------------------------------------------------
-# ---------------- RULE B for Wave-5 ----------------
-# PURE SWING STRUCTURAL HIGH
-# --------------------------------------------------
-def rule_B5(df, piv5, params):
-    n = len(df)
-    B5 = np.zeros(n, dtype=bool)
-
-    high = df["High"].values
     close = df["Close"].values
     future_n = params["future_n"]
-    swing_window = params["swing_window"]
 
-    for i in range(n - future_n):
-        if not piv5[i]:
+    for i in range(2, len(df) - future_n - 5):
+
+        if not piv[i]:
             continue
 
-        # Highest high in the recent swing window
-        if high[i] != high[i - swing_window:i + 1].max():
+        # RSI oversold + rising
+        if rsi[i] > 40 or rsi[i] <= rsi[i - 1]:
             continue
 
-        # Price should fall after
-        if close[i + future_n] >= close[i]:
+        # price rising
+        if close[i] <= close[i - 1]:
             continue
 
-        B5[i] = True
-    return B5
+        # future confirmation
+        if close[i + future_n] <= close[i]:
+            continue
+
+        A0[i] = True
+
+    return A0
 
 
-# --------------------------------------------------
-# ---------------- RULE C for Wave-5 ----------------
-# FIBONACCI TERMINAL EXTENSION
-# --------------------------------------------------
-def rule_C5(df, piv5, params):
-    n = len(df)
-    C5 = np.zeros(n, dtype=bool)
-
-    high = df["High"].values
+# ----------------------------------------------------------
+# ----------------- RULE B (Pure Swing Bottom) -------------
+# ----------------------------------------------------------
+def rule_B0(df, piv, params):
+    B0 = np.zeros(len(df), dtype=bool)
     low = df["Low"].values
-    fib_window = params["fib_window"]
+    close = df["Close"].values
+    swing = params["swing_window"]
+    future_n = params["future_n"]
 
-    for i in range(n):
-        if not piv5[i]:
+    for i in range(len(df) - future_n):
+        if not piv[i]:
             continue
 
-        # Lookback a swing low to measure extension
-        start = max(0, i - fib_window)
-        prev_low = low[start:i].min()
-        move = high[i] - prev_low
-        if prev_low <= 0:
+        start = max(0, i - swing)
+
+        if low[i] != low[start:i + 1].min():
             continue
 
-        ext = move / prev_low
+        if close[i + future_n] <= close[i]:
+            continue
 
-        # Fibonacci terminal zones (1.0, 1.272, 1.618, 2.0)
-        if 0.95 <= ext <= 2.05:
-            C5[i] = True
+        B0[i] = True
 
-    return C5
+    return B0
 
 
-# --------------------------------------------------
-# ---------------- COMBINE 0 AND 5 ----------------
-# --------------------------------------------------
+# ----------------------------------------------------------
+# ----------------- RULE C (Fibonacci Retracement) ----------
+# ----------------------------------------------------------
+def rule_C0(df, piv, params):
+    C0 = np.zeros(len(df), dtype=bool)
+    low = df["Low"].values
+    fib_win = params["fib_window"]
+
+    for i in range(len(df)):
+        if not piv[i]:
+            continue
+
+        start = max(0, i - fib_win)
+        prev_high = df["High"].iloc[start:i].max()
+
+        if prev_high <= 0:
+            continue
+
+        retr = (prev_high - low[i]) / prev_high
+
+        if 0.58 <= retr <= 1.05:
+            C0[i] = True
+
+    return C0
+
+
+# ----------------------------------------------------------
+# ----------------- FINAL WAVE 0 (A OR B OR C) -------------
+# ----------------------------------------------------------
 def add_wave0(df, timeframe):
     df = df.copy()
     params = get_params(timeframe)
 
-    piv0 = pivot_lows(df, params["pivot_k"])
+    piv = pivot_lows(df, params["pivot_k"])
 
-    lows = df["Low"].values
-    close = df["Close"].values
-    future_n = params["future_n"]
-
-    A0 = np.zeros(len(df), dtype=bool)
-    B0 = np.zeros(len(df), dtype=bool)
-    C0 = np.zeros(len(df), dtype=bool)
-
-    for i in range(len(df) - future_n):
-
-        if not piv0[i]:
-            continue
-
-        # ---------------- B0 (Pure Swing Low) fixed ----------------
-        start = max(0, i - params["swing_window"])
-        if lows[i] == lows[start:i + 1].min():
-            if close[i + future_n] > close[i]:
-                B0[i] = True
-
-        # ---------------- A0 (RSI reversal) ----------------
-        if df["RSI_14"].iloc[i] < 40 and df["RSI_14"].iloc[i] > df["RSI_14"].iloc[i - 1]:
-            if close[i] > close[i - 1]:
-                A0[i] = True
-
-        # ---------------- C0 (Fibonacci bottom) ----------------
-        start_fib = max(0, i - params["fib_window"])
-        prev_high = df["High"].iloc[start_fib:i].max()
-        if prev_high > 0:
-            retr = (prev_high - lows[i]) / prev_high
-            if 0.58 <= retr <= 1.05:
-                C0[i] = True
+    A0 = rule_A0(df, piv, params)
+    B0 = rule_B0(df, piv, params)
+    C0 = rule_C0(df, piv, params)
 
     combined = A0 | B0 | C0
 
-    # ---- cluster filtering (same as before) ----
+    lows = df["Low"].values
     final = np.zeros(len(df), dtype=bool)
+
     last = None
     last_low = None
 
@@ -243,15 +205,107 @@ def add_wave0(df, timeframe):
     return df
 
 
+# ----------------------------------------------------------
+# ----------------- RULE A (Strict Elliott Top) -------------
+# ----------------------------------------------------------
+def rule_A5(df, piv, params):
+    A5 = np.zeros(len(df), dtype=bool)
+    rsi = df["RSI_14"].values
+    close = df["Close"].values
+    high = df["High"].values
+    future_n = params["future_n"]
+
+    for i in range(2, len(df) - future_n - 5):
+
+        if not piv[i]:
+            continue
+
+        # RSI overbought + falling
+        if rsi[i] < 70 or rsi[i] >= rsi[i - 1]:
+            continue
+
+        # price falling
+        if close[i] >= close[i - 1]:
+            continue
+
+        # future confirmation
+        if close[i + future_n] >= close[i]:
+            continue
+
+        A5[i] = True
+
+    return A5
+
+
+# ----------------------------------------------------------
+# ----------------- RULE B (Pure Swing Top) ----------------
+# ----------------------------------------------------------
+def rule_B5(df, piv, params):
+    B5 = np.zeros(len(df), dtype=bool)
+    high = df["High"].values
+    close = df["Close"].values
+    swing = params["swing_window"]
+    future_n = params["future_n"]
+
+    for i in range(len(df) - future_n):
+
+        if not piv[i]:
+            continue
+
+        start = max(0, i - swing)
+
+        if high[i] != high[start:i + 1].max():
+            continue
+
+        if close[i + future_n] >= close[i]:
+            continue
+
+        B5[i] = True
+
+    return B5
+
+
+# ----------------------------------------------------------
+# ----------------- RULE C (Fibonacci Extensions) ----------
+# ----------------------------------------------------------
+def rule_C5(df, piv, params):
+    C5 = np.zeros(len(df), dtype=bool)
+    high = df["High"].values
+    low = df["Low"].values
+    fib_win = params["fib_window"]
+
+    for i in range(len(df)):
+
+        if not piv[i]:
+            continue
+
+        start = max(0, i - fib_win)
+        prev_low = low[start:i].min()
+
+        if prev_low <= 0:
+            continue
+
+        ext = (high[i] - prev_low) / prev_low
+
+        # terminal fib zones
+        if 0.95 <= ext <= 2.05:
+            C5[i] = True
+
+    return C5
+
+
+# ----------------------------------------------------------
+# ----------------- FINAL WAVE 5 (A OR B OR C) --------------
+# ----------------------------------------------------------
 def add_wave5(df, timeframe):
     df = df.copy()
     params = get_params(timeframe)
 
-    piv5 = pivot_highs(df, params["pivot_k"])
+    piv = pivot_highs(df, params["pivot_k"])
 
-    A5 = rule_A5(df, piv5, params)
-    B5 = rule_B5(df, piv5, params)
-    C5 = rule_C5(df, piv5, params)
+    A5 = rule_A5(df, piv, params)
+    B5 = rule_B5(df, piv, params)
+    C5 = rule_C5(df, piv, params)
 
     combined = A5 | B5 | C5
 
@@ -262,10 +316,12 @@ def add_wave5(df, timeframe):
     last_high = None
 
     for idx in np.where(combined)[0]:
+
         if last is None:
             final[idx] = True
             last = idx
             last_high = highs[idx]
+
         else:
             if idx - last < params["swing_window"]:
                 if highs[idx] > last_high:
@@ -273,6 +329,7 @@ def add_wave5(df, timeframe):
                     final[idx] = True
                     last = idx
                     last_high = highs[idx]
+
             else:
                 final[idx] = True
                 last = idx
@@ -282,12 +339,15 @@ def add_wave5(df, timeframe):
     return df
 
 
-# --------------------------------------------------
-# ---------------- CHART ----------------
-# --------------------------------------------------
+# ----------------------------------------------------------
+# --------------------------- CHART -------------------------
+# ----------------------------------------------------------
 def plot_chart(df, title):
+    x = df.index
+
     fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
+        rows=3, cols=1,
+        shared_xaxes=True,
         row_heights=[0.7, 0.15, 0.15],
         vertical_spacing=0.03,
         specs=[
@@ -297,8 +357,7 @@ def plot_chart(df, title):
         ]
     )
 
-    x = df.index
-
+    # Price
     fig.add_trace(go.Candlestick(
         x=x,
         open=df["Open"], high=df["High"],
@@ -312,7 +371,7 @@ def plot_chart(df, title):
             x=x, y=df[f"SMA_{s}"], mode="lines", name=f"SMA{s}"
         ), row=1, col=1)
 
-    # Wave 0 markers
+    # Wave 0
     w0 = df[df["Wave0"]]
     if not w0.empty:
         fig.add_trace(go.Scatter(
@@ -320,11 +379,11 @@ def plot_chart(df, title):
             y=w0["Low"] * 0.995,
             text=["0"] * len(w0),
             mode="text",
-            name="Wave0",
+            name="Wave 0",
             textposition="middle center"
         ), row=1, col=1)
 
-    # Wave 5 markers
+    # Wave 5
     w5 = df[df["Wave5"]]
     if not w5.empty:
         fig.add_trace(go.Scatter(
@@ -332,7 +391,7 @@ def plot_chart(df, title):
             y=w5["High"] * 1.005,
             text=["5"] * len(w5),
             mode="text",
-            name="Wave5",
+            name="Wave 5",
             textposition="middle center"
         ), row=1, col=1)
 
@@ -347,32 +406,34 @@ def plot_chart(df, title):
     return fig
 
 
-# --------------------------------------------------
-# ---------------- SIDEBAR ----------------
-# --------------------------------------------------
+# ----------------------------------------------------------
+# --------------------------- SIDEBAR ------------------------
+# ----------------------------------------------------------
 st.sidebar.header("Settings")
 
 tickers = [
-    "RELIANCE.NS", "TCS.NS", "INFY.NS", "ICICIBANK.NS",
-    "HDFCBANK.NS", "SBIN.NS", "AXISBANK.NS", "MARUTI.NS"
+    "RELIANCE.NS", "TCS.NS", "INFY.NS", "ICICIBANK.NS", "HDFCBANK.NS",
+    "SBIN.NS", "AXISBANK.NS", "TATAMOTORS.NS", "ADANIENT.NS"
 ]
 
 ticker = st.sidebar.selectbox("Select Symbol", tickers)
-custom = st.sidebar.text_input("Custom Symbol (optional)")
+custom = st.sidebar.text_input("Custom Symbol")
 if custom.strip():
     ticker = custom.strip()
 
 tabs = st.tabs(["1H", "Daily", "Weekly"])
 
-# 1H
+
+# -------------------- HOURLY --------------------
 with tabs[0]:
     df = load_data(ticker, "60d", "1h")
     df = add_indicators(df)
     df = add_wave0(df, "1h")
-    df = add_wave5(df, "1h") 
+    df = add_wave5(df, "1h")
     st.plotly_chart(plot_chart(df, f"{ticker} — 1H"), use_container_width=True)
 
-# DAILY
+
+# -------------------- DAILY ---------------------
 with tabs[1]:
     df = load_data(ticker, "3y", "1d")
     df = add_indicators(df)
@@ -380,7 +441,8 @@ with tabs[1]:
     df = add_wave5(df, "1d")
     st.plotly_chart(plot_chart(df, f"{ticker} — Daily"), use_container_width=True)
 
-# WEEKLY
+
+# -------------------- WEEKLY --------------------
 with tabs[2]:
     df = load_data(ticker, "10y", "1wk")
     df = add_indicators(df)
