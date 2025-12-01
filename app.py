@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 (Book Rules)")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 (Looser Book Rules)")
 
 
 # ---------------- DATA LOADER ----------------
@@ -80,58 +80,49 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- TIMEFRAME PARAMS FOR WAVE 0 ----------------
 def get_wave0_params(timeframe: str) -> dict:
     """
-    Parameters for Wave 0 detection depending on timeframe.
-    - pivot_k: window for local pivot lows/highs
-    - min_impulse_pct: minimum rally % from 0 to future high (Wave 1 strength)
-    - min_break_pct: minimum breakout % above previous swing high
-    - min_w1_bars: minimum bars in the post-0 rally
-    - max_w1_bars: maximum bars to search for that rally
-    - min_zero_gap: minimum distance between 0s; if closer, keep lower low
+    Slightly looser parameters for Wave 0 detection depending on timeframe.
     """
     if timeframe == "1h":
         return dict(
             pivot_k=3,
-            min_impulse_pct=0.015,   # 1.5% move from 0 to Wave1
-            min_break_pct=0.003,     # 0.3% above previous swing high
-            min_w1_bars=8,
+            min_impulse_pct=0.008,   # 0.8% move from 0 to Wave1
+            min_w1_bars=6,
             max_w1_bars=80,
-            min_zero_gap=30,
+            min_zero_gap=20,
+            future_n=7,              # next 7 candles close > close at 0
         )
     elif timeframe == "1wk":
         return dict(
             pivot_k=2,
-            min_impulse_pct=0.20,    # 20% move from 0 to Wave1
-            min_break_pct=0.02,      # 2% above previous swing high
+            min_impulse_pct=0.10,    # 10% move from 0 to Wave1
             min_w1_bars=3,
             max_w1_bars=40,
-            min_zero_gap=10,
+            min_zero_gap=8,
+            future_n=4,
         )
     else:  # "1d" default
         return dict(
             pivot_k=5,
-            min_impulse_pct=0.05,    # 5% move from 0 to Wave1
-            min_break_pct=0.01,      # 1% above previous swing high
-            min_w1_bars=5,
+            min_impulse_pct=0.03,    # 3% move from 0 to Wave1
+            min_w1_bars=4,
             max_w1_bars=60,
-            min_zero_gap=30,
+            min_zero_gap=25,
+            future_n=7,
         )
 
 
-# ---------------- WAVE 0 DETECTION ONLY (BOOK RULE STYLE) ----------------
+# ---------------- WAVE 0 DETECTION ONLY (LOOSER BOOK-INSPIRED) ----------------
 def add_wave0_labels(df: pd.DataFrame, timeframe: str = "1d") -> pd.DataFrame:
     """
-    Detect Wave 0 only, using "book style" rules:
+    Detect Wave 0 only, using a LOOSER but still "book-inspired" rule:
 
-    1) Wave 0 is a major pivot low.
-    2) It is the lowest point before a strong new impulsive rally (proxy for Wave 1).
-    3) That rally:
-       - Lasts at least min_w1_bars candles,
-       - Makes a % move (min_impulse_pct) above the Wave 0 low,
-       - Breaks above the last pivot high by at least min_break_pct.
-    4) Momentum reversal at Wave 0:
-       - RSI oversold (< 30), and
-       - Either bullish divergence vs previous pivot low OR hammer-ish candle.
-    5) If multiple 0s are within min_zero_gap candles, keep only the lowest low.
+    1) Wave 0 is a pivot low (local minimum in a window).
+    2) RSI is oversold-ish (< 40) and turning up vs previous bar.
+    3) Price also turning up (close[i] > close[i-1]).
+    4) After 0, price makes a decent impulse up (min %).
+    5) That impulse breaks the previous pivot high (even slightly).
+    6) Next N bars close above close at 0 (your old rule: "after few candles price > 0").
+    7) If multiple 0s near each other, keep the lowest low in that cluster.
     """
     df = df.copy()
     df["Wave0"] = False
@@ -143,10 +134,10 @@ def add_wave0_labels(df: pd.DataFrame, timeframe: str = "1d") -> pd.DataFrame:
     params = get_wave0_params(timeframe)
     pivot_k = params["pivot_k"]
     min_impulse_pct = params["min_impulse_pct"]
-    min_break_pct = params["min_break_pct"]
     min_w1_bars = params["min_w1_bars"]
     max_w1_bars = params["max_w1_bars"]
     min_zero_gap = params["min_zero_gap"]
+    future_n = params["future_n"]
 
     open_ = df["Open"].values
     high = df["High"].values
@@ -163,25 +154,19 @@ def add_wave0_labels(df: pd.DataFrame, timeframe: str = "1d") -> pd.DataFrame:
     pivot_high = np.zeros(n, dtype=bool)
 
     for i in range(pivot_k, n - pivot_k):
-        window_l = low[i - pivot_k : i + pivot_k + 1]
+        window_l = low[i - pivot_k: i + pivot_k + 1]
         if low[i] == window_l.min():
             pivot_low[i] = True
 
-        window_h = high[i - pivot_k : i + pivot_k + 1]
+        window_h = high[i - pivot_k: i + pivot_k + 1]
         if high[i] == window_h.max():
             pivot_high[i] = True
 
-    # Precompute previous pivot low & previous pivot high indices
-    prev_pivot_low_idx = -np.ones(n, dtype=int)
+    # Previous pivot high index for each bar
     prev_pivot_high_idx = -np.ones(n, dtype=int)
-
-    last_pl = -1
     last_ph = -1
     for i in range(n):
-        prev_pivot_low_idx[i] = last_pl
         prev_pivot_high_idx[i] = last_ph
-        if pivot_low[i]:
-            last_pl = i
         if pivot_high[i]:
             last_ph = i
 
@@ -195,74 +180,64 @@ def add_wave0_labels(df: pd.DataFrame, timeframe: str = "1d") -> pd.DataFrame:
 
         L0 = low[i]
 
-        # --- Rule 4: Reversal / RSI confirmation ---
-        rsi_i = rsi[i]
-        if np.isnan(rsi_i) or rsi_i >= 35:  # want oversold-ish
+        # --- RSI + reversal check (looser) ---
+        if np.isnan(rsi[i]):
             continue
 
-        # Bullish divergence vs previous pivot low (if exists)
-        div_ok = False
-        pl = prev_pivot_low_idx[i]
-        if pl != -1 and not np.isnan(rsi[pl]):
-            if low[i] < low[pl] and rsi[i] > rsi[pl]:
-                div_ok = True
-
-        # Simple hammer / bullish candle pattern
-        candle_ok = False
-        if not np.isnan(open_[i]) and not np.isnan(close[i]):
-            body = abs(close[i] - open_[i])
-            lower_wick = min(open_[i], close[i]) - L0
-            # Hammer-style: long lower wick vs body + bullish close
-            if close[i] > open_[i] and lower_wick > 1.5 * body:
-                candle_ok = True
-
-        # Need RSI oversold AND (divergence OR candle)
-        if not (rsi_i < 30 and (div_ok or candle_ok)):
+        # oversold-ish
+        if not (rsi[i] < 40):
             continue
 
-        # --- Rule 3, 6, 7, 8: Strong impulsive rally after 0 ("Wave 1") ---
-        # Get previous pivot high (resistance to break)
+        # RSI rising and price rising vs previous bar
+        if i > 0:
+            if not (rsi[i] > rsi[i - 1] and close[i] > close[i - 1]):
+                continue
+        else:
+            continue
+
+        # Future N bars: price should be higher than price at 0 (your rule)
+        if i + future_n < n:
+            if not (close[i + future_n] > close[i]):
+                continue
+        else:
+            # not enough future data, skip
+            continue
+
+        # Need a previous pivot high to break
         ph = prev_pivot_high_idx[i]
         if ph == -1:
-            # no structure to break, skip
             continue
 
         prev_high = high[ph]
 
-        # Future window where Wave 1 can develop
+        # --- Impulse after 0 (Wave-1 proxy) ---
         start_f = i + 1
         end_f = min(i + max_w1_bars, n - 1)
         if end_f - start_f + 1 < min_w1_bars:
             continue
 
-        fut_highs = high[start_f : end_f + 1]
+        fut_highs = high[start_f: end_f + 1]
         max_future_high = fut_highs.max()
         idx_loc = fut_highs.argmax()
-        idx_wave1 = start_f + idx_loc  # index of highest point in that window
+        idx_wave1 = start_f + idx_loc
 
         # Time rule: at least min_w1_bars candles from 0
         if (idx_wave1 - i) < min_w1_bars:
             continue
 
-        # Impulse size in %
+        # Impulse strength %
         pct_up = (max_future_high - L0) / L0
         if pct_up < min_impulse_pct:
             continue
 
-        # Break of previous swing high
-        if max_future_high < prev_high * (1.0 + min_break_pct):
+        # Break of previous swing high (even slightly)
+        if max_future_high <= prev_high:
             continue
 
-        # Optional: check that the move into 0 was downward (previous few closes)
-        if i >= 3:
-            if not (close[i] < close[i - 1] <= close[i - 2]):
-                # we can relax this, but it's nice to have
-                pass
-
-        # If all checks pass, mark candidate as Wave 0
+        # Passed all conditions → candidate Wave 0
         candidate_0[i] = True
 
-    # ---------- 3) If multiple 0s close together, keep the lowest low ----------
+    # ---------- 3) Cluster cleanup: keep lowest 0 in each neighborhood ----------
     idx_candidates = np.where(candidate_0)[0]
     final_wave0 = np.zeros(n, dtype=bool)
 
@@ -278,13 +253,13 @@ def add_wave0_labels(df: pd.DataFrame, timeframe: str = "1d") -> pd.DataFrame:
             last_low_val = this_low
         else:
             if idx - last_kept < min_zero_gap:
-                # same cluster, keep the lower low
+                # same cluster, keep lower low
                 if this_low < last_low_val:
                     final_wave0[last_kept] = False
                     final_wave0[idx] = True
                     last_kept = idx
                     last_low_val = this_low
-                # else ignore this one
+                # else ignore
             else:
                 final_wave0[idx] = True
                 last_kept = idx
