@@ -172,6 +172,7 @@ def add_wave0(df, timeframe):
 
     piv = pivot_lows(df, params["pivot_k"])
 
+    # --- A/B/C rules as before ---
     A0 = rule_A0(df, piv, params)
     B0 = rule_B0(df, piv, params)
     C0 = rule_C0(df, piv, params)
@@ -179,27 +180,57 @@ def add_wave0(df, timeframe):
     combined = A0 | B0 | C0
 
     lows = df["Low"].values
-    final = np.zeros(len(df), dtype=bool)
+    n = len(df)
+
+    # ---------- 1) Cluster filter: keep lowest in each neighborhood ----------
+    final_cluster = np.zeros(n, dtype=bool)
 
     last = None
     last_low = None
 
     for idx in np.where(combined)[0]:
         if last is None:
-            final[idx] = True
+            final_cluster[idx] = True
             last = idx
             last_low = lows[idx]
         else:
             if idx - last < params["swing_window"]:
+                # same neighborhood → keep LOWER low
                 if lows[idx] < last_low:
-                    final[last] = False
-                    final[idx] = True
+                    final_cluster[last] = False
+                    final_cluster[idx] = True
                     last = idx
                     last_low = lows[idx]
             else:
-                final[idx] = True
+                final_cluster[idx] = True
                 last = idx
                 last_low = lows[idx]
+
+    # ---------- 2) New rule: NO LOWER LOW AFTER 0 (within protection window) ----------
+    # If price makes a new low soon after 0 → trend not finished → remove that 0
+    protect_n = params["swing_window"]   # you can tweak per timeframe if you want
+
+    final = np.zeros(n, dtype=bool)
+    candidate_idxs = np.where(final_cluster)[0]
+
+    for idx in candidate_idxs:
+        # look ahead a fixed window
+        start_f = idx + 1
+        end_f = min(n, idx + 1 + protect_n)
+
+        if start_f >= end_f:
+            # not enough future data; you can either keep or drop; we keep
+            final[idx] = True
+            continue
+
+        future_min = lows[start_f:end_f].min()
+
+        # if any lower low appears soon after → reject this 0
+        if future_min < lows[idx]:
+            # downtrend continued, this is not the final bottom
+            continue
+        else:
+            final[idx] = True
 
     df["Wave0"] = final
     return df
