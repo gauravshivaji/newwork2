@@ -371,7 +371,7 @@ with tabs[0]:
     df = load_data(ticker, "60d", "1h")
     df = add_indicators(df)
     df = add_wave0(df, "1h")
-    df = add_wave5(df, "1h")
+    df = add_wave5(df, "1h") 
     st.plotly_chart(plot_chart(df, f"{ticker} — 1H"), use_container_width=True)
 
 # DAILY
